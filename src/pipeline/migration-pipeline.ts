@@ -1,6 +1,7 @@
 import { abortError } from "../abort.js";
 import type { PipelineConfig } from "../config.js";
 import type {
+  ApplyOutcome,
   MigrationEvent,
   PipelineStatus,
   SourceEventInput,
@@ -31,7 +32,26 @@ export interface MigrationPipelineOptions {
   checkpoint: CheckpointTracker;
   dlq: DlqRepository;
   random?: () => number;
+  observer?: PipelineObserver;
 }
+
+export interface PipelineObserver {
+  onReceived(): void;
+  onProcessed(outcome: ApplyOutcome, durationMs: number): void;
+  onFailure(kind: string): void;
+  onRetry(): void;
+  onDeadLetter(): void;
+  onBatch(durationMs: number): void;
+}
+
+const noObserver: PipelineObserver = {
+  onReceived: () => undefined,
+  onProcessed: () => undefined,
+  onFailure: () => undefined,
+  onRetry: () => undefined,
+  onDeadLetter: () => undefined,
+  onBatch: () => undefined,
+};
 
 export class MigrationPipeline {
   private readonly config: PipelineConfig;
@@ -42,6 +62,7 @@ export class MigrationPipeline {
   private readonly queue: BoundedQueue<WorkItem>;
   private readonly retryScheduler: RetryScheduler;
   private readonly random: () => number;
+  private readonly observer: PipelineObserver;
   private readonly idleWaiters = new Set<() => void>();
   private controller: AbortController | undefined;
   private workerPromises: Promise<void>[] = [];
@@ -58,6 +79,7 @@ export class MigrationPipeline {
     this.queue = new BoundedQueue(options.config.queueCapacity);
     this.retryScheduler = new RetryScheduler(options.config.retryCapacity);
     this.random = options.random ?? Math.random;
+    this.observer = options.observer ?? noObserver;
   }
 
   async start(): Promise<void> {
@@ -84,6 +106,7 @@ export class MigrationPipeline {
     if (!this.queue.tryEnqueue({ event, attempt: 1 })) {
       throw new Error("queue capacity changed during serialized admission");
     }
+    this.observer.onReceived();
     this.notifyStateChange();
     return { accepted: true, event };
   }
@@ -172,11 +195,13 @@ export class MigrationPipeline {
 
         this.activeWorkerCount += 1;
         this.notifyStateChange();
+        const batchStartedAt = Date.now();
         try {
           await Promise.all(
             batch.map((item) => this.processItem(item, signal)),
           );
         } finally {
+          this.observer.onBatch(Date.now() - batchStartedAt);
           this.activeWorkerCount -= 1;
           this.notifyStateChange();
         }
@@ -193,10 +218,12 @@ export class MigrationPipeline {
     item: WorkItem,
     signal: AbortSignal,
   ): Promise<void> {
+    const startedAt = Date.now();
     try {
       const record = transform(item.event);
-      await this.target.write(record, item.attempt, signal);
+      const outcome = await this.target.write(record, item.attempt, signal);
       await this.checkpoint.markTerminal(item.event.position);
+      this.observer.onProcessed(outcome, Date.now() - startedAt);
     } catch (error) {
       if (signal.aborted) {
         throw abortError(signal);
@@ -207,6 +234,11 @@ export class MigrationPipeline {
         failure instanceof RetryableTargetError ||
         failure instanceof CheckpointPersistenceError
       ) {
+        this.observer.onFailure(
+          failure instanceof CheckpointPersistenceError
+            ? "checkpoint"
+            : "retryable",
+        );
         if (item.attempt < this.config.maxAttempts) {
           const retry: WorkItem = {
             event: item.event,
@@ -222,6 +254,7 @@ export class MigrationPipeline {
             );
           try {
             this.retryScheduler.schedule(retry, dueAt);
+            this.observer.onRetry();
             this.notifyStateChange();
             return;
           } catch (scheduleError) {
@@ -238,6 +271,9 @@ export class MigrationPipeline {
         item,
         failure instanceof NonRetryableError ? "malformed" : "non_retryable",
         failure,
+      );
+      this.observer.onFailure(
+        failure instanceof NonRetryableError ? "malformed" : "non_retryable",
       );
     }
   }
@@ -257,6 +293,7 @@ export class MigrationPipeline {
       attempts: item.attempt,
       failedAt: new Date().toISOString(),
     });
+    this.observer.onDeadLetter();
     await this.checkpoint.markTerminal(item.event.position);
   }
 
