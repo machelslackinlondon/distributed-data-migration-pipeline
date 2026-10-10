@@ -64,10 +64,10 @@ export class MigrationPipeline {
   private readonly random: () => number;
   private readonly observer: PipelineObserver;
   private readonly idleWaiters = new Set<() => void>();
+  private readonly workerStates = new Map<number, "idle" | "processing">();
   private controller: AbortController | undefined;
   private workerPromises: Promise<void>[] = [];
   private retryPromise: Promise<void> | undefined;
-  private activeWorkerCount = 0;
   private state: PipelineStatus["state"] = "stopped";
   private lastSourcePosition: number;
 
@@ -91,8 +91,8 @@ export class MigrationPipeline {
     this.state = "running";
     const controller = new AbortController();
     this.controller = controller;
-    this.workerPromises = Array.from({ length: this.config.workers }, () =>
-      this.workerLoop(controller.signal),
+    this.workerPromises = Array.from({ length: this.config.workers }, (_, id) =>
+      this.workerLoop(id, controller.signal),
     );
     this.retryPromise = this.retryLoop(controller.signal);
     await this.replay();
@@ -163,7 +163,7 @@ export class MigrationPipeline {
     return {
       state: this.state,
       queueDepth: this.queue.size,
-      activeWorkers: this.activeWorkerCount,
+      activeWorkers: this.activeWorkers,
       scheduledRetries: this.retryScheduler.size,
       checkpointPosition: this.checkpoint.position,
       sourcePosition,
@@ -189,7 +189,11 @@ export class MigrationPipeline {
     });
   }
 
-  private async workerLoop(signal: AbortSignal): Promise<void> {
+  private async workerLoop(
+    workerId: number,
+    signal: AbortSignal,
+  ): Promise<void> {
+    this.workerStates.set(workerId, "idle");
     try {
       while (!signal.aborted) {
         const batch = await takeBatch(this.queue, {
@@ -202,7 +206,7 @@ export class MigrationPipeline {
           return;
         }
 
-        this.activeWorkerCount += 1;
+        this.workerStates.set(workerId, "processing");
         this.notifyStateChange();
         const batchStartedAt = Date.now();
         try {
@@ -211,7 +215,7 @@ export class MigrationPipeline {
           );
         } finally {
           this.observer.onBatch(Date.now() - batchStartedAt);
-          this.activeWorkerCount -= 1;
+          this.workerStates.set(workerId, "idle");
           this.notifyStateChange();
         }
       }
@@ -327,7 +331,7 @@ export class MigrationPipeline {
   private isIdle(): boolean {
     return (
       this.queue.size === 0 &&
-      this.activeWorkerCount === 0 &&
+      this.activeWorkers === 0 &&
       this.retryScheduler.size === 0 &&
       this.checkpoint.position >= this.source.maxPosition()
     );
@@ -346,5 +350,15 @@ export class MigrationPipeline {
     if (this.state !== "running") {
       throw new Error("pipeline is not running");
     }
+  }
+
+  private get activeWorkers(): number {
+    let active = 0;
+    for (const state of this.workerStates.values()) {
+      if (state === "processing") {
+        active += 1;
+      }
+    }
+    return active;
   }
 }

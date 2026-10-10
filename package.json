@@ -2,6 +2,7 @@
   "name": "distributed-data-migration-pipeline",
   "version": "1.0.0",
   "description": "A bounded, observable data migration pipeline with safe replay and reconciliation.",
+  "license": "MIT",
   "type": "module",
   "private": false,
   "engines": {

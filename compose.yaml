@@ -1,0 +1,15 @@
+services:
+  migration-pipeline:
+    build: .
+    environment:
+      DATABASE_PATH: /data/migration.sqlite
+      HOST: 0.0.0.0
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - migration-data:/data
+    restart: unless-stopped
+
+volumes:
+  migration-data:
