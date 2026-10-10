@@ -69,6 +69,7 @@ export class MigrationPipeline {
   private retryPromise: Promise<void> | undefined;
   private activeWorkerCount = 0;
   private state: PipelineStatus["state"] = "stopped";
+  private lastSourcePosition: number;
 
   constructor(options: MigrationPipelineOptions) {
     this.config = options.config;
@@ -80,6 +81,7 @@ export class MigrationPipeline {
     this.retryScheduler = new RetryScheduler(options.config.retryCapacity);
     this.random = options.random ?? Math.random;
     this.observer = options.observer ?? noObserver;
+    this.lastSourcePosition = options.source.maxPosition();
   }
 
   async start(): Promise<void> {
@@ -103,6 +105,7 @@ export class MigrationPipeline {
     }
 
     const event = this.source.append(input);
+    this.lastSourcePosition = event.position;
     if (!this.queue.tryEnqueue({ event, attempt: 1 })) {
       throw new Error("queue capacity changed during serialized admission");
     }
@@ -124,6 +127,7 @@ export class MigrationPipeline {
       for (const event of events) {
         await this.queue.enqueue({ event, attempt: 1 });
         position = event.position;
+        this.lastSourcePosition = event.position;
       }
     }
   }
@@ -145,12 +149,17 @@ export class MigrationPipeline {
     ]);
     this.workerPromises = [];
     this.retryPromise = undefined;
+    this.lastSourcePosition = this.source.maxPosition();
     this.state = "stopped";
     this.notifyStateChange();
   }
 
   status(): PipelineStatus {
-    const sourcePosition = this.source.maxPosition();
+    const sourcePosition =
+      this.state === "stopped"
+        ? this.lastSourcePosition
+        : this.source.maxPosition();
+    this.lastSourcePosition = sourcePosition;
     return {
       state: this.state,
       queueDepth: this.queue.size,
