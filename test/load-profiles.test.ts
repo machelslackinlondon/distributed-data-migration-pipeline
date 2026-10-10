@@ -2,6 +2,7 @@ import { describe, expect, test } from "@jest/globals";
 
 import {
   loadProfiles,
+  parseLoadMetrics,
   parseProfileName,
   shapeLoadResult,
 } from "../scripts/load-profiles.js";
@@ -67,6 +68,12 @@ describe("load test profiles", () => {
       residentMemoryBytes: 80_000_000,
       targetCount: 3_900,
       deadLetterCount: 5,
+      processingLatencyTotalSeconds: 20,
+      processedCount: 4_000,
+      batchLatencyTotalSeconds: 10,
+      batchCount: 200,
+      retryCount: 25,
+      deadLetteredCount: 5,
     });
 
     expect(output).toMatchObject({
@@ -79,8 +86,32 @@ describe("load test profiles", () => {
         queueDepth: 4,
         retryDepth: 1,
         deadLetterCount: 5,
+        processingLatencyAverageMs: 5,
+        batchLatencyAverageMs: 50,
+        retryRatePerSecond: 5,
+        deadLetterRatePerSecond: 1,
       },
       note: "Observed local result only; do not extrapolate production capacity.",
+    });
+  });
+
+  test("extracts load measurements from Prometheus metrics", () => {
+    const metrics = `
+migration_processing_latency_seconds_sum 0.25
+migration_processing_latency_seconds_count 10
+migration_batch_latency_seconds_sum 0.1
+migration_batch_latency_seconds_count 4
+migration_records_retried_total 8
+migration_records_dead_lettered_total 2
+`;
+
+    expect(parseLoadMetrics(metrics)).toEqual({
+      processingLatencyTotalSeconds: 0.25,
+      processedCount: 10,
+      batchLatencyTotalSeconds: 0.1,
+      batchCount: 4,
+      retryCount: 8,
+      deadLetteredCount: 2,
     });
   });
 });

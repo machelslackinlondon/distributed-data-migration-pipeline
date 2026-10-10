@@ -14,6 +14,7 @@ import {
 import { createRuntime } from "../src/runtime.js";
 import {
   loadProfiles,
+  parseLoadMetrics,
   parseProfileName,
   shapeLoadResult,
   type FaultMode,
@@ -63,6 +64,11 @@ async function main(): Promise<void> {
       instance.on("response", (client) => client.setBody(nextBody()));
     });
     await runtime.pipeline.awaitIdle(5_000).catch(() => undefined);
+    const metricsResponse = await runtime.app.inject({
+      method: "GET",
+      url: "/metrics",
+    });
+    const loadMetrics = parseLoadMetrics(metricsResponse.body);
     const cpu = process.cpuUsage(cpuStart);
     const memory = process.memoryUsage();
     const output = shapeLoadResult({
@@ -80,6 +86,7 @@ async function main(): Promise<void> {
       residentMemoryBytes: memory.rss,
       targetCount: runtime.target.countRecords(),
       deadLetterCount: runtime.dlq.count(),
+      ...loadMetrics,
     });
     console.log(JSON.stringify(output, null, 2));
   } finally {

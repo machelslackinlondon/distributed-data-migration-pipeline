@@ -72,6 +72,12 @@ export interface RawLoadResult {
   residentMemoryBytes: number;
   targetCount: number;
   deadLetterCount: number;
+  processingLatencyTotalSeconds: number;
+  processedCount: number;
+  batchLatencyTotalSeconds: number;
+  batchCount: number;
+  retryCount: number;
+  deadLetteredCount: number;
 }
 
 export function shapeLoadResult(input: RawLoadResult) {
@@ -101,11 +107,57 @@ export function shapeLoadResult(input: RawLoadResult) {
       ),
       targetUniqueRecordCount: input.targetCount,
       deadLetterCount: input.deadLetterCount,
+      processingLatencyAverageMs: averageMilliseconds(
+        input.processingLatencyTotalSeconds,
+        input.processedCount,
+      ),
+      batchLatencyAverageMs: averageMilliseconds(
+        input.batchLatencyTotalSeconds,
+        input.batchCount,
+      ),
+      retryRatePerSecond: rate(input.retryCount, input.durationSeconds),
+      deadLetterRatePerSecond: rate(
+        input.deadLetteredCount,
+        input.durationSeconds,
+      ),
       cpuUserMicros: input.cpuUserMicros,
       cpuSystemMicros: input.cpuSystemMicros,
       residentMemoryBytes: input.residentMemoryBytes,
     },
     note: "Observed local result only; do not extrapolate production capacity.",
+  };
+}
+
+export function parseLoadMetrics(
+  metrics: string,
+): Pick<
+  RawLoadResult,
+  | "processingLatencyTotalSeconds"
+  | "processedCount"
+  | "batchLatencyTotalSeconds"
+  | "batchCount"
+  | "retryCount"
+  | "deadLetteredCount"
+> {
+  return {
+    processingLatencyTotalSeconds: metricValue(
+      metrics,
+      "migration_processing_latency_seconds_sum",
+    ),
+    processedCount: metricValue(
+      metrics,
+      "migration_processing_latency_seconds_count",
+    ),
+    batchLatencyTotalSeconds: metricValue(
+      metrics,
+      "migration_batch_latency_seconds_sum",
+    ),
+    batchCount: metricValue(metrics, "migration_batch_latency_seconds_count"),
+    retryCount: metricValue(metrics, "migration_records_retried_total"),
+    deadLetteredCount: metricValue(
+      metrics,
+      "migration_records_dead_lettered_total",
+    ),
   };
 }
 
@@ -121,4 +173,25 @@ function profile(
 
 function rate(count: number, seconds: number): number {
   return Math.round((count / seconds) * 100) / 100;
+}
+
+function averageMilliseconds(totalSeconds: number, count: number): number {
+  return count === 0 ? 0 : round((totalSeconds * 1_000) / count);
+}
+
+function metricValue(metrics: string, name: string): number {
+  const prefix = `${name} `;
+  const line = metrics
+    .split("\n")
+    .find((candidate) => candidate.startsWith(prefix));
+  const value =
+    line === undefined ? Number.NaN : Number(line.slice(prefix.length));
+  if (!Number.isFinite(value)) {
+    throw new Error(`load metric '${name}' is missing or invalid`);
+  }
+  return value;
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
 }

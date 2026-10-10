@@ -101,6 +101,8 @@ The end-to-end hot path is O(n log r) in the worst case because retry scheduling
 
 Dynamic programming would add little here. Retry timing, queueing, checkpoint-prefix detection, and ordered reconciliation have direct greedy/streaming solutions. DP becomes appropriate if the migration adds an optimization problem with overlapping subproblems—for example, choosing dependency-respecting migration groups under a cost/capacity budget. It would not improve the current scheduler.
 
+An optional optimization exercise is to assign each possible batch `i..j` a cost comprising one network round trip, database-write cost, per-record processing, and any size penalty, subject to `j - i + 1 <= MAX_BATCH_SIZE`. Then solve `best[j] = min(best[i] + cost(i..j))` over valid preceding boundaries, using prefix sums for range costs. This has optimal substructure and overlapping prefixes, so memoized or bottom-up DP is appropriate at O(n × maximum batch size). If cost is simply a constant per batch plus linear per-record work, the largest valid batch is greedily optimal and DP is unnecessary.
+
 ## Storage model
 
 SQLite runs in WAL mode with `synchronous=FULL`:
@@ -236,9 +238,9 @@ npm run load:test -- --profile=large-batches
 npm run load:test -- --profile=small-batches
 ```
 
-Each result includes request rate, p99 latency, errors/timeouts/non-2xx responses, queue/worker/retry depth, checkpoint position and lag, checkpoint-derived throughput, unique target rows, DLQ count, CPU time, and resident memory.
+Each result includes request rate, HTTP p99, average event-processing and batch latency, errors/timeouts/non-2xx responses, queue/worker/retry depth, retry and DLQ rates, checkpoint position and lag, checkpoint-derived throughput, unique target rows, DLQ count, CPU time, and resident memory.
 
-One observed `steady` run on 10 October 2026 processed 500 requests/s for 10 seconds with 35 ms p99, zero errors/timeouts/non-2xx responses, a final checkpoint of 5,010, zero lag, approximately 499.5 checkpointed records/s, 997 unique target records, zero dead letters, and about 201 MiB RSS. This is a local functional baseline, not a production capacity claim; compare profiles on the same machine and commit before drawing conclusions.
+One observed `steady` run on 10 October 2026 processed 500.6 requests/s for 10 seconds with 37 ms HTTP p99, 4.96 ms average processing latency, 6.46 ms average batch latency, zero errors/timeouts/non-2xx responses, a final checkpoint of 5,016, zero lag, approximately 500.1 checkpointed records/s, 1,000 unique target records, zero retries/dead letters, and about 215 MiB RSS. This is a local functional baseline, not a production capacity claim; compare profiles on the same machine and commit before drawing conclusions.
 
 ## Observability and operations
 
@@ -324,6 +326,7 @@ test/                       unit, integration, restart, and API tests
 - Batch siblings are processed independently with `Promise.all`; errors are classified inside each item rather than rejecting the whole batch.
 - Canonical hashing trims names and lowercases email addresses before SHA-256, so reconciliation compares the same representation the target stores.
 - Reconciliation streams ordered pages from both sides. Samples are capped, but mismatch counts remain complete.
+- Duplicate physical records are structurally excluded by source/target primary keys. Duplicate deliveries are exposed as processing outcomes and collapse to an idempotent no-op, so reconciliation treats duplicate row count as zero by construction while separately counting dead letters and state mismatches.
 - Graceful shutdown drains with a deadline; forced interruption remains safe because the durable log and checkpoint replay unfinished positions.
 
 Natural extensions are a DLQ inspection/redrive API, trace propagation, pluggable source/target adapters, breaker state, broker consumers, range-partitioned reconciliation, schema evolution/versioned transformers, and deployment-level readiness/draining controls.
