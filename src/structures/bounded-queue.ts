@@ -7,6 +7,9 @@ export class QueueClosedError extends Error {
 
 interface ConsumerWaiter<T> {
   resolve: (item: T | undefined) => void;
+  reject: (error: unknown) => void;
+  signal?: AbortSignal;
+  onAbort?: () => void;
 }
 
 interface ProducerWaiter<T> {
@@ -48,7 +51,7 @@ export class BoundedQueue<T> {
 
     const consumer = this.consumers.shift();
     if (consumer !== undefined) {
-      consumer.resolve(item);
+      this.resolveConsumer(consumer, item);
       return true;
     }
 
@@ -70,7 +73,7 @@ export class BoundedQueue<T> {
     });
   }
 
-  dequeue(): Promise<T | undefined> {
+  dequeue(signal?: AbortSignal): Promise<T | undefined> {
     if (this.length > 0) {
       const item = this.shift();
       this.promoteProducer();
@@ -82,8 +85,25 @@ export class BoundedQueue<T> {
       return Promise.resolve(undefined);
     }
 
-    return new Promise<T | undefined>((resolve) => {
-      this.consumers.push({ resolve });
+    if (signal?.aborted === true) {
+      return Promise.reject(abortError(signal));
+    }
+
+    return new Promise<T | undefined>((resolve, reject) => {
+      const consumer: ConsumerWaiter<T> = { resolve, reject };
+      if (signal !== undefined) {
+        const onAbort = (): void => {
+          const index = this.consumers.indexOf(consumer);
+          if (index >= 0) {
+            this.consumers.splice(index, 1);
+          }
+          reject(abortError(signal));
+        };
+        consumer.signal = signal;
+        consumer.onAbort = onAbort;
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+      this.consumers.push(consumer);
     });
   }
 
@@ -128,7 +148,18 @@ export class BoundedQueue<T> {
       return;
     }
     for (const consumer of this.consumers.splice(0)) {
-      consumer.resolve(undefined);
+      this.resolveConsumer(consumer, undefined);
     }
   }
+
+  private resolveConsumer(
+    consumer: ConsumerWaiter<T>,
+    item: T | undefined,
+  ): void {
+    if (consumer.signal !== undefined && consumer.onAbort !== undefined) {
+      consumer.signal.removeEventListener("abort", consumer.onAbort);
+    }
+    consumer.resolve(item);
+  }
 }
+import { abortError } from "../abort.js";

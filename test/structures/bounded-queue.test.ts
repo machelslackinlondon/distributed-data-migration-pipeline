@@ -64,6 +64,28 @@ describe("BoundedQueue", () => {
     await expect(fullQueue.dequeue()).resolves.toBeUndefined();
   });
 
+  test("aborting a waiting consumer does not consume the next item", async () => {
+    const queue = new BoundedQueue<number>(1);
+    const controller = new AbortController();
+    const consumer = queue.dequeue(controller.signal);
+
+    controller.abort(new Error("cancelled"));
+
+    await expect(consumer).rejects.toThrow("cancelled");
+    expect(queue.tryEnqueue(9)).toBe(true);
+    await expect(queue.dequeue()).resolves.toBe(9);
+  });
+
+  test("normalizes a non-Error abort reason", async () => {
+    const queue = new BoundedQueue<number>(1);
+    const controller = new AbortController();
+    const consumer = queue.dequeue(controller.signal);
+
+    controller.abort("stop");
+
+    await expect(consumer).rejects.toThrow("operation aborted");
+  });
+
   test("rejects non-positive capacity", () => {
     expect(() => new BoundedQueue(0)).toThrow(
       "queue capacity must be a positive integer",
